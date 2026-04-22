@@ -1,6 +1,6 @@
 """
 Freelance Task Bot — Telegram
-Compatible with python-telegram-bot >= 21.x / 22.x
+Compatible with python-telegram-bot >= 22.x
 """
 
 import os
@@ -19,8 +19,7 @@ from telegram.ext import (
 )
 
 # ─────────────────────────────────────────────
-#  CONFIG — read from environment variables
-#  Set BOT_TOKEN and ADMIN_ID in Railway dashboard
+#  CONFIG — set these in Railway Variables tab
 # ─────────────────────────────────────────────
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 ADMIN_ID  = int(os.environ.get("ADMIN_ID", "0"))
@@ -33,14 +32,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ConversationHandler states
+# ── Conversation states ──
 (
     ASK_TITLE,
     ASK_DESC,
     ASK_PAY,
+    ASK_CATEGORY,       # <-- now inside the conversation
     ASK_SCREENSHOT,
     ASK_REJECT_REASON,
-) = range(5)
+) = range(6)
 
 CATEGORY_ICONS = {
     "writing":  "✍️",
@@ -155,7 +155,6 @@ STATUS_LABELS = {
 
 
 def esc(text):
-    """MarkdownV2 escaping."""
     if not text:
         return ""
     text = str(text)
@@ -183,15 +182,29 @@ def fmt_task(t, show_freelancer=False):
 
 def main_menu_keyboard(user_id):
     kb = [
-        [InlineKeyboardButton("➕ Post a Task",               callback_data="menu_post")],
-        [InlineKeyboardButton("📋 Available Tasks",           callback_data="menu_available")],
-        [InlineKeyboardButton("🗂 My Tasks (Freelancer)",     callback_data="menu_my_freelancer")],
-        [InlineKeyboardButton("📁 My Posted Tasks (Client)",  callback_data="menu_my_client")],
+        [InlineKeyboardButton("➕ Post a Task",              callback_data="menu_post")],
+        [InlineKeyboardButton("📋 Available Tasks",          callback_data="menu_available")],
+        [InlineKeyboardButton("🗂 My Tasks (Freelancer)",    callback_data="menu_my_freelancer")],
+        [InlineKeyboardButton("📁 My Posted Tasks (Client)", callback_data="menu_my_client")],
     ]
     if user_id == ADMIN_ID:
-        kb.append([InlineKeyboardButton("🔔 Review Queue",     callback_data="menu_review")])
-        kb.append([InlineKeyboardButton("💰 Approved & Paid",  callback_data="menu_paid")])
+        kb.append([InlineKeyboardButton("🔔 Review Queue",    callback_data="menu_review")])
+        kb.append([InlineKeyboardButton("💰 Approved & Paid", callback_data="menu_paid")])
     return InlineKeyboardMarkup(kb)
+
+
+def category_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✍️ Writing",  callback_data="cat_writing"),
+            InlineKeyboardButton("🎨 Design",   callback_data="cat_design"),
+        ],
+        [
+            InlineKeyboardButton("🔬 Research", callback_data="cat_research"),
+            InlineKeyboardButton("📊 Data",     callback_data="cat_data"),
+        ],
+        [InlineKeyboardButton("📦 Other", callback_data="cat_other")],
+    ])
 
 
 # ═══════════════════════════════════════════════
@@ -216,13 +229,12 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ═══════════════════════════════════════════════
-#  MENU CALLBACKS (non-conversation ones)
+#  MENU CALLBACKS
 # ═══════════════════════════════════════════════
 
 async def menu_available(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    user = q.from_user
     tasks = list_tasks(status="available")
     if not tasks:
         await q.message.reply_text(
@@ -315,15 +327,16 @@ async def menu_paid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ═══════════════════════════════════════════════
 #  CREATE TASK CONVERSATION
+#  Entry → title → desc → pay → category → done
 # ═══════════════════════════════════════════════
 
 async def menu_post(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Entry point for create-task conversation."""
+    """Entry point — triggered by ➕ Post a Task button."""
     q = update.callback_query
     await q.answer()
     ctx.user_data["new_task"] = {}
     await q.message.reply_text(
-        "📝 *Create a new task*\n\nStep 1 of 3 — What is the *title* of this task?",
+        "📝 *Create a new task*\n\nStep 1 of 4 — What is the *title* of this task?",
         parse_mode="MarkdownV2",
     )
     return ASK_TITLE
@@ -332,7 +345,7 @@ async def menu_post(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def ask_title(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data.setdefault("new_task", {})["title"] = update.message.text.strip()
     await update.message.reply_text(
-        "Step 2 of 3 — Write a *description* of what needs to be done:",
+        "Step 2 of 4 — Write a *description* of what needs to be done:",
         parse_mode="MarkdownV2",
     )
     return ASK_DESC
@@ -341,7 +354,7 @@ async def ask_title(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def ask_desc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["new_task"]["description"] = update.message.text.strip()
     await update.message.reply_text(
-        "Step 3 of 3 — What is the *payment amount* in € \\(numbers only, e\\.g\\. 25\\)?",
+        "Step 3 of 4 — What is the *payment amount* in € \\(numbers only, e\\.g\\. 25\\)?",
         parse_mode="MarkdownV2",
     )
     return ASK_PAY
@@ -353,42 +366,37 @@ async def ask_pay(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if pay <= 0:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("⚠️ Please enter a valid positive number\\.", parse_mode="MarkdownV2")
+        await update.message.reply_text(
+            "⚠️ Please enter a valid positive number \\(e\\.g\\. 25\\)\\.",
+            parse_mode="MarkdownV2",
+        )
         return ASK_PAY
 
     ctx.user_data["new_task"]["payment"] = pay
-    kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✍️ Writing",  callback_data="cat_writing"),
-            InlineKeyboardButton("🎨 Design",   callback_data="cat_design"),
-        ],
-        [
-            InlineKeyboardButton("🔬 Research", callback_data="cat_research"),
-            InlineKeyboardButton("📊 Data",     callback_data="cat_data"),
-        ],
-        [InlineKeyboardButton("📦 Other", callback_data="cat_other")],
-    ])
     await update.message.reply_text(
-        "Pick a *category* for the task:",
+        "Step 4 of 4 — Pick a *category* for the task:",
         parse_mode="MarkdownV2",
-        reply_markup=kb,
+        reply_markup=category_keyboard(),
     )
-    return ConversationHandler.END
+    return ASK_CATEGORY
 
 
-async def category_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def ask_category(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handles category button press — INSIDE the conversation."""
     q = update.callback_query
     await q.answer()
+
     category = q.data.replace("cat_", "")
     user = q.from_user
-
     nt = ctx.user_data.get("new_task", {})
+
+    # Safety check
     if not nt or "title" not in nt:
         await q.message.reply_text(
-            "⚠️ Session expired\\. Please use /start and try again\\.",
+            "⚠️ Something went wrong\\. Please use /start and try again\\.",
             parse_mode="MarkdownV2",
         )
-        return
+        return ConversationHandler.END
 
     task_id = create_task(
         client_id=user.id,
@@ -402,11 +410,12 @@ async def category_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     task = get_task(task_id)
 
     await q.message.reply_text(
-        f"🎉 *Task posted\\!*\n\n{fmt_task(task)}",
+        f"🎉 *Task posted successfully\\!*\n\n{fmt_task(task)}",
         parse_mode="MarkdownV2",
         reply_markup=main_menu_keyboard(user.id),
     )
 
+    # Notify admin
     try:
         await ctx.bot.send_message(
             ADMIN_ID,
@@ -415,6 +424,8 @@ async def category_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         logger.warning(f"Could not notify admin: {e}")
+
+    return ConversationHandler.END
 
 
 # ═══════════════════════════════════════════════
@@ -433,7 +444,7 @@ async def take_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     if task["status"] != "available":
         await q.message.reply_text(
-            "⛔ This task is no longer available — someone else may have claimed it\\.",
+            "⛔ This task is no longer available\\.",
             parse_mode="MarkdownV2",
         )
         return
@@ -445,7 +456,7 @@ async def take_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton("📤 Submit completed work", callback_data=f"submit_{task_id}")
     ]])
     await q.message.reply_text(
-        f"🔵 *Task claimed\\!*\n\n{fmt_task(task)}\n\nComplete the work, then press the button below to submit your screenshot\\.",
+        f"🔵 *Task claimed\\!*\n\n{fmt_task(task)}\n\nComplete the work then press the button below to submit\\.",
         parse_mode="MarkdownV2",
         reply_markup=kb,
     )
@@ -474,7 +485,6 @@ async def take_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ═══════════════════════════════════════════════
 
 async def submit_entry(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Entry point for submit-work conversation."""
     q = update.callback_query
     await q.answer()
     task_id = int(q.data.split("_")[1])
@@ -490,7 +500,7 @@ async def submit_entry(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     ctx.user_data["submit_task_id"] = task_id
     await q.message.reply_text(
-        f"📸 Send a *screenshot/photo* of your completed work for task \\#{task_id}\\: _{esc(task['title'])}_",
+        f"📸 Send a *screenshot/photo* of your completed work for task \\#{task_id}\\:\n_{esc(task['title'])}_",
         parse_mode="MarkdownV2",
     )
     return ASK_SCREENSHOT
@@ -592,7 +602,6 @@ async def approve_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ═══════════════════════════════════════════════
 
 async def reject_entry(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Entry point for reject conversation."""
     q = update.callback_query
     await q.answer()
     if q.from_user.id != ADMIN_ID:
@@ -668,17 +677,18 @@ def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # ── Conversation: create task ──
+    # ── Conversation: create task (category is now INSIDE) ──
     create_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(menu_post, pattern="^menu_post$")],
         states={
-            ASK_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_title)],
-            ASK_DESC:  [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_desc)],
-            ASK_PAY:   [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_pay)],
+            ASK_TITLE:    [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_title)],
+            ASK_DESC:     [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_desc)],
+            ASK_PAY:      [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_pay)],
+            ASK_CATEGORY: [CallbackQueryHandler(ask_category, pattern="^cat_")],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         per_user=True,
-        per_chat=False,
+        per_chat=True,
         allow_reentry=True,
     )
 
@@ -690,7 +700,7 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         per_user=True,
-        per_chat=False,
+        per_chat=True,
         allow_reentry=True,
     )
 
@@ -702,17 +712,16 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         per_user=True,
-        per_chat=False,
+        per_chat=True,
         allow_reentry=True,
     )
 
-    # ── Register handlers ──
+    # ── Register all handlers ──
     app.add_handler(CommandHandler("start", start))
     app.add_handler(create_conv)
     app.add_handler(submit_conv)
     app.add_handler(reject_conv)
 
-    # Menu callbacks (no conversation needed)
     app.add_handler(CallbackQueryHandler(menu_available,     pattern="^menu_available$"))
     app.add_handler(CallbackQueryHandler(menu_my_freelancer, pattern="^menu_my_freelancer$"))
     app.add_handler(CallbackQueryHandler(menu_my_client,     pattern="^menu_my_client$"))
@@ -720,7 +729,6 @@ def main():
     app.add_handler(CallbackQueryHandler(menu_paid,          pattern="^menu_paid$"))
     app.add_handler(CallbackQueryHandler(take_callback,      pattern=r"^take_\d+$"))
     app.add_handler(CallbackQueryHandler(approve_callback,   pattern=r"^approve_\d+$"))
-    app.add_handler(CallbackQueryHandler(category_callback,  pattern="^cat_"))
 
     logger.info("Bot is running...")
     app.run_polling(drop_pending_updates=True)
